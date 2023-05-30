@@ -24,7 +24,7 @@
 use crate::{Chain, ChainWithBalances, ChainWithMessages};
 use bp_messages::{ChainWithMessages as ChainWithMessagesBase, MessageNonce};
 use bp_runtime::ChainId;
-use frame_support::{weights::Weight, sp_runtime::StateVersion};
+use frame_support::{sp_runtime::StateVersion, weights::Weight};
 use std::time::Duration;
 
 /// Chain that may be used in tests.
