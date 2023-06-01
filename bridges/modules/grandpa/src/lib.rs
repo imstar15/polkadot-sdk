@@ -44,7 +44,6 @@ use bp_header_chain::{
 };
 use bp_runtime::{BlockNumberOf, HashOf, HasherOf, HeaderId, HeaderOf, OwnedBridgeModule};
 use frame_support::{dispatch::PostDispatchInfo, ensure, DefaultNoBound};
-use sp_consensus_grandpa::SetId;
 use sp_runtime::{
 	traits::{Header as HeaderT, Zero},
 	SaturatedConversion,
@@ -527,7 +526,7 @@ pub mod pallet {
 	fn may_refund_call_fee<T: Config<I>, I: 'static>(
 		finality_target: &BridgedHeader<T, I>,
 		justification: &GrandpaJustification<BridgedHeader<T, I>>,
-		current_set_id: SetId,
+		current_set_id: sp_consensus_grandpa::SetId,
 		improved_by: BridgedBlockNumber<T, I>,
 	) -> bool {
 		// if we have refunded too much at this block => not refunding
