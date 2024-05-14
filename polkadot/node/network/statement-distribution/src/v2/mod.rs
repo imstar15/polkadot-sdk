@@ -321,7 +321,7 @@ impl State {
 	/// Create a new state.
 	pub(crate) fn new(keystore: KeystorePtr) -> Self {
 		State {
-			implicit_view: Default::default(),
+			implicit_view: ImplicitView::new(None),
 			candidates: Default::default(),
 			per_relay_parent: HashMap::new(),
 			per_session: HashMap::new(),

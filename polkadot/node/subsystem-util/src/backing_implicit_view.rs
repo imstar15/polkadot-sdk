@@ -17,12 +17,18 @@
 use futures::channel::oneshot;
 use polkadot_node_subsystem::{
 	errors::ChainApiError,
-	messages::{ChainApiMessage, ProspectiveParachainsMessage},
+	messages::{ChainApiMessage, ProspectiveParachainsMessage, RuntimeApiMessage},
 	SubsystemSender,
 };
 use polkadot_primitives::{BlockNumber, Hash, Id as ParaId};
 
 use std::collections::HashMap;
+
+use crate::{
+	request_session_index_for_child,
+	runtime::{prospective_parachains_mode, ProspectiveParachainsMode},
+	LOG_TARGET,
+};
 
 // Always aim to retain 1 block before the active leaves.
 const MINIMUM_RETAIN_LENGTH: BlockNumber = 2;
@@ -30,10 +36,24 @@ const MINIMUM_RETAIN_LENGTH: BlockNumber = 2;
 /// Handles the implicit view of the relay chain derived from the immediate view, which
 /// is composed of active leaves, and the minimum relay-parents allowed for
 /// candidates of various parachains at those leaves.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct View {
 	leaves: HashMap<Hash, ActiveLeafPruningInfo>,
 	block_info_storage: HashMap<Hash, BlockInfo>,
+	collating_for: Option<ParaId>,
+}
+
+impl View {
+	/// TODO
+	pub fn new(collating_for: Option<ParaId>) -> Self {
+		Self { leaves: Default::default(), block_info_storage: Default::default(), collating_for }
+	}
+}
+
+impl Default for View {
+	fn default() -> Self {
+		Self::new(None)
+	}
 }
 
 // Minimum relay parents implicitly relative to a particular block.
@@ -118,14 +138,16 @@ impl View {
 	/// queried with [`View::known_allowed_relay_parents_under`].
 	///
 	/// No-op for known leaves.
+	/// TODO: update this comment.
 	pub async fn activate_leaf<Sender>(
 		&mut self,
 		sender: &mut Sender,
 		leaf_hash: Hash,
-	) -> Result<Vec<ParaId>, FetchError>
+	) -> Result<(), FetchError>
 	where
-		Sender: SubsystemSender<ChainApiMessage>,
-		Sender: SubsystemSender<ProspectiveParachainsMessage>,
+		Sender: SubsystemSender<ChainApiMessage>
+			+ SubsystemSender<ProspectiveParachainsMessage>
+			+ SubsystemSender<RuntimeApiMessage>,
 	{
 		if self.leaves.contains_key(&leaf_hash) {
 			return Err(FetchError::AlreadyKnown)
@@ -135,6 +157,7 @@ impl View {
 			leaf_hash,
 			&mut self.block_info_storage,
 			&mut *sender,
+			self.collating_for,
 		)
 		.await;
 
@@ -150,7 +173,7 @@ impl View {
 
 				self.leaves.insert(leaf_hash, ActiveLeafPruningInfo { retain_minimum });
 
-				Ok(fetched.relevant_paras)
+				Ok(())
 			},
 			Err(e) => Err(e),
 		}
@@ -265,28 +288,110 @@ pub enum BlockHeaderUnavailableReason {
 struct FetchSummary {
 	minimum_ancestor_number: BlockNumber,
 	leaf_number: BlockNumber,
-	relevant_paras: Vec<ParaId>,
+}
+
+async fn prospective_parachains_min_relay_parents<
+	Sender: SubsystemSender<ProspectiveParachainsMessage>,
+>(
+	leaf_hash: Hash,
+	sender: &mut Sender,
+) -> Result<Vec<(ParaId, BlockNumber)>, FetchError> {
+	let (tx, rx) = oneshot::channel();
+	sender
+		.send_message(ProspectiveParachainsMessage::GetMinimumRelayParents(leaf_hash, tx))
+		.await;
+
+	rx.await.map_err(|_| FetchError::ProspectiveParachainsUnavailable)
+}
+
+async fn para_min_relay_parent<Sender>(
+	leaf_hash: Hash,
+	sender: &mut Sender,
+) -> Result<Option<BlockNumber>, FetchError>
+where
+	Sender: SubsystemSender<ProspectiveParachainsMessage>
+		+ SubsystemSender<RuntimeApiMessage>
+		+ SubsystemSender<ChainApiMessage>,
+{
+	let ProspectiveParachainsMode::Enabled { allowed_ancestry_len, .. } =
+		prospective_parachains_mode(sender, leaf_hash).await.unwrap()
+	else {
+		return Ok(None)
+	};
+
+	let required_session =
+		request_session_index_for_child(leaf_hash, sender).await.await.unwrap().unwrap();
+
+	let (tx, rx) = oneshot::channel();
+	sender
+		.send_message(ChainApiMessage::Ancestors {
+			hash: leaf_hash,
+			k: allowed_ancestry_len,
+			response_channel: tx,
+		})
+		.await;
+
+	let hashes = rx
+		.await
+		.map_err(|_| FetchError::ChainApiUnavailable)?
+		.map_err(|err| FetchError::ChainApiError(leaf_hash, err))?;
+
+	let mut min = None;
+	for hash in hashes {
+		let (tx, rx) = oneshot::channel();
+		sender.send_message(ChainApiMessage::BlockHeader(hash, tx)).await;
+		let header = rx
+			.await
+			.map_err(|_| FetchError::ChainApiUnavailable)?
+			.map_err(|err| FetchError::ChainApiError(leaf_hash, err))?;
+
+		let number = match header {
+			None => {
+				gum::warn!(
+					target: LOG_TARGET,
+					relay_hash = ?hash,
+					"Failed to fetch info for hash returned from ancestry.",
+				);
+
+				// Return, however far we got.
+				break
+			},
+			Some(header) => header.number,
+		};
+
+		// The relay chain cannot accept blocks backed from previous sessions, with
+		// potentially previous validators. This is a technical limitation we need to
+		// respect here.
+		let session = request_session_index_for_child(hash, sender).await.await.unwrap().unwrap();
+
+		if session == required_session {
+			min = Some(number);
+		} else {
+			break
+		}
+	}
+
+	Ok(min)
 }
 
 async fn fetch_fresh_leaf_and_insert_ancestry<Sender>(
 	leaf_hash: Hash,
 	block_info_storage: &mut HashMap<Hash, BlockInfo>,
 	sender: &mut Sender,
+	collating_for: Option<ParaId>,
 ) -> Result<FetchSummary, FetchError>
 where
-	Sender: SubsystemSender<ChainApiMessage>,
-	Sender: SubsystemSender<ProspectiveParachainsMessage>,
+	Sender: SubsystemSender<ChainApiMessage>
+		+ SubsystemSender<ProspectiveParachainsMessage>
+		+ SubsystemSender<RuntimeApiMessage>,
 {
-	let min_relay_parents_raw = {
-		let (tx, rx) = oneshot::channel();
-		sender
-			.send_message(ProspectiveParachainsMessage::GetMinimumRelayParents(leaf_hash, tx))
-			.await;
-
-		match rx.await {
-			Ok(m) => m,
-			Err(_) => return Err(FetchError::ProspectiveParachainsUnavailable),
-		}
+	let min_relay_parents = if let Some(para_id) = collating_for {
+		para_min_relay_parent(leaf_hash, sender)
+			.await?
+			.map(|x| vec![(para_id, x)])
+			.unwrap_or_default()
+	} else {
+		prospective_parachains_min_relay_parents(leaf_hash, sender).await?
 	};
 
 	let leaf_header = {
@@ -313,8 +418,7 @@ where
 		}
 	};
 
-	let min_min = min_relay_parents_raw.iter().map(|x| x.1).min().unwrap_or(leaf_header.number);
-	let relevant_paras = min_relay_parents_raw.iter().map(|x| x.0).collect();
+	let min_min = min_relay_parents.iter().map(|x| x.1).min().unwrap_or(leaf_header.number);
 	let expected_ancestry_len = (leaf_header.number.saturating_sub(min_min) as usize) + 1;
 
 	let ancestry = if leaf_header.number > 0 {
@@ -380,14 +484,11 @@ where
 		vec![leaf_hash]
 	};
 
-	let fetched_ancestry = FetchSummary {
-		minimum_ancestor_number: min_min,
-		leaf_number: leaf_header.number,
-		relevant_paras,
-	};
+	let fetched_ancestry =
+		FetchSummary { minimum_ancestor_number: min_min, leaf_number: leaf_header.number };
 
 	let allowed_relay_parents = AllowedRelayParents {
-		minimum_relay_parents: min_relay_parents_raw.iter().cloned().collect(),
+		minimum_relay_parents: min_relay_parents.into_iter().collect(),
 		allowed_relay_parents_contiguous: ancestry,
 	};
 

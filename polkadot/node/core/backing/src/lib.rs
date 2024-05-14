@@ -328,7 +328,7 @@ impl State {
 		keystore: KeystorePtr,
 	) -> Self {
 		State {
-			implicit_view: ImplicitView::default(),
+			implicit_view: ImplicitView::new(None),
 			per_leaf: HashMap::default(),
 			per_relay_parent: HashMap::default(),
 			per_candidate: HashMap::new(),
