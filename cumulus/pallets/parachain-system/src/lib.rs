@@ -42,6 +42,7 @@ use frame_support::{
 	storage,
 	traits::Get,
 	weights::Weight,
+	log,
 };
 use frame_system::{ensure_none, ensure_root, pallet_prelude::HeaderFor};
 use polkadot_parachain_primitives::primitives::RelayChainBlockNumber;
@@ -1070,22 +1071,29 @@ impl<T: Config> Pallet<T> {
 	) -> Weight {
 		let dm_count = downward_messages.len() as u32;
 		let mut dmq_head = <LastDmqMqcHead<T>>::get();
+		log::error!("111111");
 
 		let mut weight_used = Weight::zero();
 		if dm_count != 0 {
+			log::error!("22222");
 			Self::deposit_event(Event::DownwardMessagesReceived { count: dm_count });
 			let max_weight =
 				<ReservedDmpWeightOverride<T>>::get().unwrap_or_else(T::ReservedDmpWeight::get);
 
+			log::error!("44444");
 			let message_iter = downward_messages
 				.into_iter()
 				.inspect(|m| {
+					log::error!("55555");
 					dmq_head.extend_downward(m);
+					log::error!("66666");
 				})
 				.map(|m| (m.sent_at, m.msg));
+			log::error!("77777");
 			weight_used += T::DmpMessageHandler::handle_dmp_messages(message_iter, max_weight);
 			<LastDmqMqcHead<T>>::put(&dmq_head);
 
+			log::error!("88888");
 			Self::deposit_event(Event::DownwardMessagesProcessed {
 				weight_used,
 				dmq_head: dmq_head.head(),
@@ -1097,7 +1105,9 @@ impl<T: Config> Pallet<T> {
 		//
 		// A mismatch means that at least some of the submitted messages were altered, omitted or
 		// added improperly.
+		log::error!("99999");
 		assert_eq!(dmq_head.head(), expected_dmq_mqc_head);
+		log::error!("aaaaa");
 
 		ProcessedDownwardMessages::<T>::put(dm_count);
 
