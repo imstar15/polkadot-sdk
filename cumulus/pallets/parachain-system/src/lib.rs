@@ -42,7 +42,6 @@ use frame_support::{
 	storage,
 	traits::Get,
 	weights::Weight,
-	log,
 };
 use frame_system::{ensure_none, ensure_root, pallet_prelude::HeaderFor};
 use polkadot_parachain_primitives::primitives::RelayChainBlockNumber;
